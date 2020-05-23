@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -286,6 +287,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			}
 		}
 
+		// HTTP CONNECT Fast Open. We merely close the connection if Open fails.
+		wFlusher, ok := w.(http.Flusher)
+		if !ok {
+			return caddyhttp.Error(http.StatusInternalServerError,
+				fmt.Errorf("ResponseWriter doesn't implement http.Flusher"))
+		}
+		// Creates a padding of [30, 30+32)
+		padding_len := rand.Intn(32) + 30
+		padding := make([]byte, padding_len)
+		bits := rand.Uint64()
+		for i := 0; i < 16; i++ {
+			// Codes that won't be Huffman coded.
+			padding[i] = "!#$()+<>?@[]^`{}"[bits & 15]
+			bits >>= 4
+		}
+		for i := 16; i < padding_len; i++ {
+			padding[i] = '~'
+		}
+		w.Header().Set("Padding", string(padding))
+		w.WriteHeader(http.StatusOK)
+		wFlusher.Flush()
+
 		hostPort := r.URL.Host
 		if hostPort == "" {
 			hostPort = r.Host
@@ -309,14 +332,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			fallthrough
 		case 3:
 			defer r.Body.Close()
-			wFlusher, ok := w.(http.Flusher)
-			if !ok {
-				return caddyhttp.Error(http.StatusInternalServerError,
-					fmt.Errorf("ResponseWriter doesn't implement http.Flusher"))
-			}
-			w.WriteHeader(http.StatusOK)
-			wFlusher.Flush()
-			return dualStream(targetConn, r.Body, w)
+			return dualStream(targetConn, r.Body, w, r.Header.Get("Padding") != "")
 		}
 
 		panic("There was a check for http version, yet it's incorrect")
@@ -596,26 +612,38 @@ func serveHijack(w http.ResponseWriter, targetConn net.Conn) error {
 			fmt.Errorf("failed to send response to client: %v", err))
 	}
 
-	return dualStream(targetConn, clientConn, clientConn)
+	return dualStream(targetConn, clientConn, clientConn, false)
 }
+
+const (
+	NoPadding = 0
+	AddPadding = 1
+	RemovePadding = 2
+	NumFirstPaddings = 8
+)
 
 // Copies data target->clientReader and clientWriter->target, and flushes as needed
 // Returns when clientWriter-> target stream is done.
 // Caddy should finish writing target -> clientReader.
-func dualStream(target net.Conn, clientReader io.ReadCloser, clientWriter io.Writer) error {
-	stream := func(w io.Writer, r io.Reader) error {
+func dualStream(target net.Conn, clientReader io.ReadCloser, clientWriter io.Writer, padding bool) error {
+	stream := func(w io.Writer, r io.Reader, padding_type int) error {
 		// copy bytes from r to w
 		buf := bufferPool.Get().([]byte)
 		buf = buf[0:cap(buf)]
-		_, _err := flushingIoCopy(w, r, buf)
+		_, _err := flushingIoCopy(w, r, buf, padding_type)
 		bufferPool.Put(buf)
 		if cw, ok := w.(closeWriter); ok {
 			cw.CloseWrite()
 		}
 		return _err
 	}
-	go stream(target, clientReader)
-	return stream(clientWriter, target)
+	if (padding) {
+		go stream(target, clientReader, RemovePadding)
+		return stream(clientWriter, target, AddPadding)
+	} else {
+		go stream(target, clientReader, NoPadding)
+		return stream(clientWriter, target, NoPadding)
+	}
 }
 
 type closeWriter interface {
@@ -625,16 +653,43 @@ type closeWriter interface {
 // flushingIoCopy is analogous to buffering io.Copy(), but also attempts to flush on each iteration.
 // If dst does not implement http.Flusher(e.g. net.TCPConn), it will do a simple io.CopyBuffer().
 // Reasoning: http2ResponseWriter will not flush on its own, so we have to do it manually.
-func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte) (written int64, err error) {
-	flusher, ok := dst.(http.Flusher)
-	if !ok {
-		return io.CopyBuffer(dst, src, buf)
-	}
+func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, padding_type int) (written int64, err error) {
+	flusher, has_flusher := dst.(http.Flusher)
+	var num_padding int
 	for {
-		nr, er := src.Read(buf)
+		var nr int
+		var er error
+		if (padding_type == AddPadding && num_padding < NumFirstPaddings) {
+			num_padding++
+			padding_size := rand.Intn(256)
+			max_read := 65536 - 3 - padding_size
+			nr, er = src.Read(buf[3:max_read])
+			if nr > 0 {
+				buf[0] = byte(nr / 256)
+				buf[1] = byte(nr % 256)
+				buf[2] = byte(padding_size)
+				nr += 3 + padding_size
+			}
+		} else if (padding_type == RemovePadding && num_padding < NumFirstPaddings) {
+			num_padding++
+			nr, er = io.ReadFull(src, buf[0:3])
+			if nr > 0 {
+				nr = int(buf[0]) * 256 + int(buf[1])
+				padding_size := int(buf[2])
+				nr, er = io.ReadFull(src, buf[0:nr])
+				if nr > 0 {
+					var junk [256]byte
+					_, er = io.ReadFull(src, junk[0:padding_size])
+				}
+			}
+		} else {
+			nr, er = src.Read(buf)
+		}
 		if nr > 0 {
 			nw, ew := dst.Write(buf[0:nr])
-			flusher.Flush()
+			if has_flusher {
+				flusher.Flush()
+			}
 			if nw > 0 {
 				written += int64(nw)
 			}
@@ -708,7 +763,7 @@ function FindProxyForURL(url, host) {
 
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 0, 32*1024)
+		return make([]byte, 0, 64*1024)
 	},
 }
 
