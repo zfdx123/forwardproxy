@@ -332,7 +332,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			fallthrough
 		case 3:
 			defer r.Body.Close()
-			return dualStream(targetConn, r.Body, w, r.Header.Get("Padding") != "")
+			padding := r.Header.Get("Padding")
+			// Ignores old client padding of "..."
+			return dualStream(targetConn, r.Body, w, padding != "" && padding[0] != '.')
 		}
 
 		panic("There was a check for http version, yet it's incorrect")
