@@ -668,6 +668,9 @@ func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (
 				buf[0] = byte(nr / 256)
 				buf[1] = byte(nr % 256)
 				buf[2] = byte(paddingSize)
+				for i := 0; i < paddingSize; i++ {
+					buf[3 + nr + i] = 0
+				}
 				nr += 3 + paddingSize
 			}
 		} else if (paddingType == RemovePadding && numPadding < NumFirstPaddings) {
