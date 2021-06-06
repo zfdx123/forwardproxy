@@ -294,15 +294,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				fmt.Errorf("ResponseWriter doesn't implement http.Flusher"))
 		}
 		// Creates a padding of [30, 30+32)
-		padding_len := rand.Intn(32) + 30
-		padding := make([]byte, padding_len)
+		paddingLen := rand.Intn(32) + 30
+		padding := make([]byte, paddingLen)
 		bits := rand.Uint64()
 		for i := 0; i < 16; i++ {
 			// Codes that won't be Huffman coded.
 			padding[i] = "!#$()+<>?@[]^`{}"[bits & 15]
 			bits >>= 4
 		}
-		for i := 16; i < padding_len; i++ {
+		for i := 16; i < paddingLen; i++ {
 			padding[i] = '~'
 		}
 		w.Header().Set("Padding", string(padding))
@@ -626,11 +626,11 @@ const (
 // Returns when clientWriter-> target stream is done.
 // Caddy should finish writing target -> clientReader.
 func dualStream(target net.Conn, clientReader io.ReadCloser, clientWriter io.Writer, padding bool) error {
-	stream := func(w io.Writer, r io.Reader, padding_type int) error {
+	stream := func(w io.Writer, r io.Reader, paddingType int) error {
 		// copy bytes from r to w
 		buf := bufferPool.Get().([]byte)
 		buf = buf[0:cap(buf)]
-		_, _err := flushingIoCopy(w, r, buf, padding_type)
+		_, _err := flushingIoCopy(w, r, buf, paddingType)
 		bufferPool.Put(buf)
 		if cw, ok := w.(closeWriter); ok {
 			cw.CloseWrite()
@@ -653,33 +653,33 @@ type closeWriter interface {
 // flushingIoCopy is analogous to buffering io.Copy(), but also attempts to flush on each iteration.
 // If dst does not implement http.Flusher(e.g. net.TCPConn), it will do a simple io.CopyBuffer().
 // Reasoning: http2ResponseWriter will not flush on its own, so we have to do it manually.
-func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, padding_type int) (written int64, err error) {
-	flusher, has_flusher := dst.(http.Flusher)
-	var num_padding int
+func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (written int64, err error) {
+	flusher, hasFlusher := dst.(http.Flusher)
+	var numPadding int
 	for {
 		var nr int
 		var er error
-		if (padding_type == AddPadding && num_padding < NumFirstPaddings) {
-			num_padding++
-			padding_size := rand.Intn(256)
-			max_read := 65536 - 3 - padding_size
-			nr, er = src.Read(buf[3:max_read])
+		if (paddingType == AddPadding && numPadding < NumFirstPaddings) {
+			numPadding++
+			paddingSize := rand.Intn(256)
+			maxRead := 65536 - 3 - paddingSize
+			nr, er = src.Read(buf[3:maxRead])
 			if nr > 0 {
 				buf[0] = byte(nr / 256)
 				buf[1] = byte(nr % 256)
-				buf[2] = byte(padding_size)
-				nr += 3 + padding_size
+				buf[2] = byte(paddingSize)
+				nr += 3 + paddingSize
 			}
-		} else if (padding_type == RemovePadding && num_padding < NumFirstPaddings) {
-			num_padding++
+		} else if (paddingType == RemovePadding && numPadding < NumFirstPaddings) {
+			numPadding++
 			nr, er = io.ReadFull(src, buf[0:3])
 			if nr > 0 {
 				nr = int(buf[0]) * 256 + int(buf[1])
-				padding_size := int(buf[2])
+				paddingSize := int(buf[2])
 				nr, er = io.ReadFull(src, buf[0:nr])
 				if nr > 0 {
 					var junk [256]byte
-					_, er = io.ReadFull(src, junk[0:padding_size])
+					_, er = io.ReadFull(src, junk[0:paddingSize])
 				}
 			}
 		} else {
@@ -687,7 +687,7 @@ func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, padding_type int) 
 		}
 		if nr > 0 {
 			nw, ew := dst.Write(buf[0:nr])
-			if has_flusher {
+			if hasFlusher {
 				flusher.Flush()
 			}
 			if nw > 0 {
