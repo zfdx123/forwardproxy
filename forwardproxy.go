@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/sagernet/uot"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -299,7 +300,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		bits := rand.Uint64()
 		for i := 0; i < 16; i++ {
 			// Codes that won't be Huffman coded.
-			padding[i] = "!#$()+<>?@[]^`{}"[bits & 15]
+			padding[i] = "!#$()+<>?@[]^`{}"[bits&15]
 			bits >>= 4
 		}
 		for i := 16; i < paddingLen; i++ {
@@ -471,6 +472,15 @@ func (h Handler) dialContextCheckACL(ctx context.Context, network, hostPort stri
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
 
+	if host == uot.UOTMagicAddress {
+		udpConn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			return nil, err
+		}
+
+		return uot.NewServerConn(udpConn), nil
+	}
+
 	if h.upstream != nil {
 		// if upstreaming -- do not resolve locally nor check acl
 		conn, err = h.dialContext(ctx, network, hostPort)
@@ -616,9 +626,9 @@ func serveHijack(w http.ResponseWriter, targetConn net.Conn) error {
 }
 
 const (
-	NoPadding = 0
-	AddPadding = 1
-	RemovePadding = 2
+	NoPadding        = 0
+	AddPadding       = 1
+	RemovePadding    = 2
 	NumFirstPaddings = 8
 )
 
@@ -637,7 +647,7 @@ func dualStream(target net.Conn, clientReader io.ReadCloser, clientWriter io.Wri
 		}
 		return _err
 	}
-	if (padding) {
+	if padding {
 		go stream(target, clientReader, RemovePadding)
 		return stream(clientWriter, target, AddPadding)
 	} else {
@@ -659,7 +669,7 @@ func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (
 	for {
 		var nr int
 		var er error
-		if (paddingType == AddPadding && numPadding < NumFirstPaddings) {
+		if paddingType == AddPadding && numPadding < NumFirstPaddings {
 			numPadding++
 			paddingSize := rand.Intn(256)
 			maxRead := 65536 - 3 - paddingSize
@@ -669,15 +679,15 @@ func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (
 				buf[1] = byte(nr % 256)
 				buf[2] = byte(paddingSize)
 				for i := 0; i < paddingSize; i++ {
-					buf[3 + nr + i] = 0
+					buf[3+nr+i] = 0
 				}
 				nr += 3 + paddingSize
 			}
-		} else if (paddingType == RemovePadding && numPadding < NumFirstPaddings) {
+		} else if paddingType == RemovePadding && numPadding < NumFirstPaddings {
 			numPadding++
 			nr, er = io.ReadFull(src, buf[0:3])
 			if nr > 0 {
-				nr = int(buf[0]) * 256 + int(buf[1])
+				nr = int(buf[0])*256 + int(buf[1])
 				paddingSize := int(buf[2])
 				nr, er = io.ReadFull(src, buf[0:nr])
 				if nr > 0 {
