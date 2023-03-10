@@ -41,6 +41,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/forwardproxy/httpclient"
+	"github.com/sagernet/sing/common/uot"
 	"go.uber.org/zap"
 	"golang.org/x/net/proxy"
 )
@@ -473,6 +474,15 @@ func (h Handler) dialContextCheckACL(ctx context.Context, network, hostPort stri
 	if err != nil {
 		// return nil, &proxyError{S: err.Error(), Code: http.StatusBadRequest}
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
+	}
+
+	if host == uot.UOTMagicAddress {
+		udpConn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			return nil, err
+		}
+
+		return uot.NewServerConn(udpConn), nil
 	}
 
 	if h.upstream != nil {
